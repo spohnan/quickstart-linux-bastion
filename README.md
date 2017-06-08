@@ -1,3 +1,5 @@
+[Quick Launch](https://console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=ha-bastion&templateURL=https://s3.amazonaws.com/cfn-andyspohn-com/quickstart-linux-bastion/templates/linux-bastion-master.template) forked ELB version of bastion service.
+
 # quickstart-linux-bastion
 
 This Quick Start adds Linux bastion functionality to your AWS Cloud environment. It deploys Linux bastion hosts that provide secure access to your Linux instances in public or private subnets. Use this Quick Start as a building block for your Linux-based deployments on AWS. You can choose to create a new VPC environment for your Linux bastion hosts or deploy them into your existing VPC environment. After you deploy the Quick Start, you can add other AWS services, infrastructure components, and software layers to complete your test or production Linux environment on the AWS Cloud.

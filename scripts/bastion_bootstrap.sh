@@ -367,95 +367,6 @@ EOF
     echo "${FUNCNAME[0]} Ended"
 }
 
-function request_eip() {
-    release=$(osrelease)
-    export Region=`curl http://169.254.169.254/latest/meta-data/placement/availability-zone | rev | cut -c 2- | rev`
-
-    #Check if EIP already assigned.
-    ALLOC=1
-    ZERO=0
-    INSTANCE_IP=`ifconfig -a | grep inet | awk {'print $2'} | sed 's/addr://g' | head -1`
-    ASSIGNED=$(aws ec2 describe-addresses --region $Region --output text | grep $INSTANCE_IP | wc -l)
-    if [ "$ASSIGNED" -gt "$ZERO" ]; then
-        echo "Already assigned an EIP."
-    else
-        aws ec2 describe-addresses --region $Region --output text > /query.txt
-        #Ensure we are only using EIPs from our Stack
-        line=`curl http://169.254.169.254/latest/user-data/ | grep EIP_LIST`
-        IFS=$':' DIRS=(${line//$','/:})       # Replace tabs with colons.
-
-        for (( i=0 ; i<${#DIRS[@]} ; i++ )); do
-            EIP=`echo ${DIRS[i]} | sed 's/\"//g' | sed 's/EIP_LIST=//g'`
-            if [ $EIP != "Null" ]; then
-                #echo "$i: $EIP"
-                grep "$EIP" /query.txt >> /query2.txt;
-            fi
-        done
-        mv /query2.txt /query.txt
-
-
-        AVAILABLE_EIPs=`cat /query.txt | wc -l`
-
-        if [ "$AVAILABLE_EIPs" -gt "$ZERO" ]; then
-            FIELD_COUNT="5"
-            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-            echo "Running associate_eip_now"
-            while read name;
-            do
-                #EIP_ENTRY=$(echo $name | grep eip | wc -l)
-                EIP_ENTRY=$(echo $name | grep eni | wc -l)
-                echo "EIP: $EIP_ENTRY"
-                if [ "$EIP_ENTRY" -eq 1 ]; then
-                    echo "Already associated with an instance"
-                    echo ""
-                else
-                    export EIP=`echo "$name" | sed 's/[\s]+/,/g' | awk {'print $4'}`
-                    EIPALLOC=`echo $name | awk {'print $2'}`
-                    echo "NAME: $name"
-                    echo "EIP: $EIP"
-                    echo "EIPALLOC: $EIPALLOC"
-                    aws ec2 associate-address --instance-id $INSTANCE_ID --allocation-id $EIPALLOC --region $Region
-                fi
-            done < /query.txt
-        else
-            echo "[ERROR] No Elastic IPs available in this region"
-            exit 1
-        fi
-
-        INSTANCE_IP=`ifconfig -a | grep inet | awk {'print $2'} | sed 's/addr://g' | head -1`
-        ASSIGNED=$(aws ec2 describe-addresses --region $Region --output text | grep $INSTANCE_IP | wc -l)
-        if [ "$ASSIGNED" -eq 1 ]; then
-            echo "EIP successfully assigned."
-        else
-            #Retry
-            while [ "$ASSIGNED" -eq "$ZERO" ]
-            do
-                sleep 3
-                request_eip
-                INSTANCE_IP=`ifconfig -a | grep inet | awk {'print $2'} | sed 's/addr://g' | head -1`
-                ASSIGNED=$(aws ec2 describe-addresses --region $Region --output text | grep $INSTANCE_IP | wc -l)
-            done
-        fi
-    fi
-
-    echo "${FUNCNAME[0]} Ended"
-}
-
-function call_request_eip() {
-    Region=`curl http://169.254.169.254/latest/meta-data/placement/availability-zone | rev | cut -c 2- | rev`
-    ZERO=0
-    INSTANCE_IP=`ifconfig -a | grep inet | awk {'print $2'} | sed 's/addr://g' | head -1`
-    ASSIGNED=$(aws ec2 describe-addresses --region $Region --output text | grep $INSTANCE_IP | wc -l)
-    if [ "$ASSIGNED" -gt "$ZERO" ]; then
-        echo "Already assigned an EIP."
-    else
-        WAIT=$(shuf -i 1-30 -n 1)
-        sleep "$WAIT"
-        request_eip
-    fi
-    echo "${FUNCNAME[0]} Ended"
-}
-
 function prevent_process_snooping() {
     # Prevent bastion host users from viewing processes owned by other users.
 
@@ -474,7 +385,7 @@ checkos
 SSH_BANNER="LINUX BASTION"
 
 # Read the options from cli input
-TEMP=`getopt -o h:  --long help,banner:,enable:,tcp-forwarding:,x11-forwarding: -n $0 -- "$@"`
+TEMP=`getopt -o h:  --long help,banner:,enable:,ssh-server-cert-bucket:,tcp-forwarding:,x11-forwarding: -n $0 -- "$@"`
 eval set -- "$TEMP"
 
 
@@ -493,6 +404,10 @@ while true; do
             ;;
         --enable)
             ENABLE="$2";
+            shift 2
+            ;;
+        --ssh-server-cert-bucket)
+            SSH_SERVER_CERT_BUCKET="$2";
             shift 2
             ;;
         --tcp-forwarding)
@@ -586,6 +501,36 @@ fi
 
 prevent_process_snooping
 
-call_request_eip
+
+# Set all bastion instances to the same hostname
+hostname bastion
+
+# Turn on auto-updates
+yum -y install jq yum-cron
+chkconfig yum-cron on && service yum-cron start
+
+## Sync server SSH keys
+export AWS_DEFAULT_REGION=$Region
+INSTANCE_ID=$(curl --silent http://169.254.169.254/latest/meta-data/instance-id)
+keys_not_present() {
+	return $(aws s3 ls s3://${SSH_SERVER_CERT_BUCKET}/ssh/ssh_host_rsa_key | wc -l)
+}
+download_keys() {
+	rm -f /etc/ssh/ssh_host*
+	aws s3api wait object-exists --bucket ${SSH_SERVER_CERT_BUCKET} --key ssh/ssh_host_rsa_key
+	aws s3 sync s3://${SSH_SERVER_CERT_BUCKET}/ssh/ /etc/ssh/ --include 'ssh_host*'
+	find /etc/ssh -name "*key" -exec chmod 600 {} \;
+	service sshd restart
+}
+if keys_not_present ; then
+	LEAD_BASTION=$(aws autoscaling describe-auto-scaling-instances | jq --raw-output --sort-keys '.AutoScalingInstances[].InstanceId' | head -1)
+	if [ "$INSTANCE_ID" = "$LEAD_BASTION" ] ; then
+		aws s3 cp /etc/ssh/ s3://${SSH_SERVER_CERT_BUCKET}/ssh/ --recursive --exclude '*' --include '*key*'
+	else
+		download_keys
+	fi
+else
+	download_keys
+fi
 
 echo "Bootstrap complete."

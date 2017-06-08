@@ -182,14 +182,14 @@
         "QSS3BucketName": {
             "AllowedPattern": "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$",
             "ConstraintDescription": "Quick Start bucket name can include numbers, lowercase letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen (-).",
-            "Default": "quickstart-reference",
+            "Default": "cfn-andyspohn-com",
             "Description": "S3 bucket name for the Quick Start assets. Quick Start bucket name can include numbers, lowercase letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen (-).",
             "Type": "String"
         },
         "QSS3KeyPrefix": {
             "AllowedPattern": "^[0-9a-zA-Z-/]*$",
             "ConstraintDescription": "Quick Start key prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slash (/).",
-            "Default": "linux/bastion/latest/",
+            "Default": "quickstart-linux-bastion/",
             "Description": "S3 key prefix for the Quick Start assets. Quick Start key prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slash (/).",
             "Type": "String"
         },
@@ -332,50 +332,15 @@
             "Ubuntu-Server-16.04-LTS-HVM": {
                 "Code": "US1604HVM"
             }
+        },
+        "AdditionHack" : {
+            "1" : {"AddOne" : "2"},
+            "2" : {"AddOne" : "3"},
+            "3" : {"AddOne" : "4"},
+            "4" : {"AddOne" : "5"}
         }
     },
     "Conditions": {
-        "2BastionCondition": {
-            "Fn::Or": [
-                {
-                    "Fn::Equals": [
-                        {
-                            "Ref": "NumBastionHosts"
-                        },
-                        "2"
-                    ]
-                },
-                {
-                    "Condition": "3BastionCondition"
-                },
-                {
-                    "Condition": "4BastionCondition"
-                }
-            ]
-        },
-        "3BastionCondition": {
-            "Fn::Or": [
-                {
-                    "Fn::Equals": [
-                        {
-                            "Ref": "NumBastionHosts"
-                        },
-                        "3"
-                    ]
-                },
-                {
-                    "Condition": "4BastionCondition"
-                }
-            ]
-        },
-        "4BastionCondition": {
-            "Fn::Equals": [
-                {
-                    "Ref": "NumBastionHosts"
-                },
-                "4"
-            ]
-        },
         "GovCloudCondition": {
             "Fn::Equals": [
                 {
@@ -488,18 +453,73 @@
                             "Statement": [
                                 {
                                     "Action": [
-                                        "ec2:AssociateAddress",
-                                        "ec2:DescribeAddresses"
+                                        "s3:ListBucket"
                                     ],
-                                    "Resource": [
-                                        "*"
-                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": [
+                                            "arn:${Partition}:s3:::${SSHServerCertBucket}",
+                                            {
+                                                "Partition": {
+                                                    "Fn::If": [
+                                                        "GovCloudCondition",
+                                                        "aws-us-gov",
+                                                        "aws"
+                                                    ]
+                                                }
+                                            }
+                                        ]
+                                    },
                                     "Effect": "Allow"
                                 }
                             ]
                         },
-                        "PolicyName": "bastion-eip-policy"
-                    }
+                        "PolicyName": "list-cert-bucket"
+                    },
+                    {
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Action": [
+                                        "s3:GetObject",
+                                        "s3:PutObject"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": [
+                                            "arn:${Partition}:s3:::${SSHServerCertBucket}/*",
+                                            {
+                                                "Partition": {
+                                                    "Fn::If": [
+                                                        "GovCloudCondition",
+                                                        "aws-us-gov",
+                                                        "aws"
+                                                    ]
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "Effect": "Allow"
+                                }
+                            ]
+                        },
+                        "PolicyName": "update-cert-bucket"
+                    },
+					{
+					    "PolicyDocument": {
+                             "Version": "2012-10-17",
+                             "Statement": [
+                                 {
+                                     "Action": [
+                                         "autoscaling:DescribeAutoScalingInstances",
+                                         "autoscaling:CompleteLifecycleAction"
+                                     ],
+                                     "Resource": "*",
+                                     "Effect": "Allow"
+                                 }
+                             ]
+                         },
+                         "PolicyName": "ec2-to-asg-deployment"
+					}
                 ],
                 "Path": "/",
                 "AssumeRolePolicyDocument": {
@@ -531,31 +551,38 @@
                 "Path": "/"
             }
         },
-        "EIP1": {
-            "Type": "AWS::EC2::EIP",
-            "Properties": {
-                "Domain": "vpc"
-            }
+        "SSHServerCertBucket": {
+            "Type": "AWS::S3::Bucket",
+            "DeletionPolicy": "Retain"
         },
-        "EIP2": {
-            "Type": "AWS::EC2::EIP",
-            "Condition": "2BastionCondition",
+        "BastionLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
             "Properties": {
-                "Domain": "vpc"
-            }
-        },
-        "EIP3": {
-            "Type": "AWS::EC2::EIP",
-            "Condition": "3BastionCondition",
-            "Properties": {
-                "Domain": "vpc"
-            }
-        },
-        "EIP4": {
-            "Type": "AWS::EC2::EIP",
-            "Condition": "4BastionCondition",
-            "Properties": {
-                "Domain": "vpc"
+                "CrossZone": "true",
+                "ConnectionSettings": {
+                    "IdleTimeout": "75"
+                },
+                "Subnets": [
+                    {
+                        "Ref": "PublicSubnet1ID"
+                    },
+                    {
+                        "Ref": "PublicSubnet2ID"
+                    }
+                ],
+                "SecurityGroups": [
+                    {
+                        "Ref": "BastionSecurityGroup"
+                    }
+                ],
+                "Listeners": [
+                    {
+                        "InstancePort": "22",
+                        "LoadBalancerPort": "22",
+                        "Protocol": "TCP",
+                        "InstanceProtocol": "TCP"
+                    }
+                ]
             }
         },
         "BastionAutoScalingGroup": {
@@ -564,6 +591,11 @@
                 "LaunchConfigurationName": {
                     "Ref": "BastionLaunchConfiguration"
                 },
+                "LoadBalancerNames": [
+                    {
+                        "Ref": "BastionLoadBalancer"
+                    }
+                ],
                 "VPCZoneIdentifier": [
                     {
                         "Ref": "PublicSubnet1ID"
@@ -582,6 +614,9 @@
                 "DesiredCapacity": {
                     "Ref": "NumBastionHosts"
                 },
+                "TerminationPolicies": [
+                    "OldestInstance"
+                ],
                 "Tags": [
                     {
                         "Key": "Name",
@@ -597,6 +632,28 @@
                     },
                     "Timeout": "PT30M"
                 }
+            }
+        },
+        "ScheduledActionUp": {
+            "Type": "AWS::AutoScaling::ScheduledAction",
+            "Properties": {
+                "AutoScalingGroupName": {
+                    "Ref": "BastionAutoScalingGroup"
+                },
+                "MaxSize": { "Fn::FindInMap" : [ "AdditionHack", { "Ref" : "NumBastionHosts" }, "AddOne" ] },
+                "MinSize": { "Fn::FindInMap" : [ "AdditionHack", { "Ref" : "NumBastionHosts" }, "AddOne" ] },
+                "Recurrence": "5 * * * *"
+            }
+        },
+        "ScheduledActionDown": {
+            "Type": "AWS::AutoScaling::ScheduledAction",
+            "Properties": {
+                "AutoScalingGroupName": {
+                    "Ref": "BastionAutoScalingGroup"
+                },
+                "MaxSize": { "Ref" : "NumBastionHosts" },
+                "MinSize": { "Ref" : "NumBastionHosts" },
+                "Recurrence": "10 * * * *"
             }
         },
         "BastionLaunchConfiguration": {
@@ -654,6 +711,10 @@
                                             {
                                                 "Ref": "EnableBanner"
                                             },
+											" --ssh-server-cert-bucket ",
+											{
+												"Ref": "SSHServerCertBucket"
+											},
                                             " --tcp-forwarding ",
                                             {
                                                 "Ref": "EnableTCPForwarding"
@@ -718,41 +779,6 @@
                                 "pip install --upgrade pip &> /dev/null\n",
                                 "pip install awscli --ignore-installed six &> /dev/null\n",
                                 "easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n",
-                                "EIP_LIST=\"",
-                                {
-                                    "Ref": "EIP1"
-                                },
-                                ",",
-                                {
-                                    "Fn::If": [
-                                        "2BastionCondition",
-                                        {
-                                            "Ref": "EIP2"
-                                        },
-                                        "Null"
-                                    ]
-                                },
-                                ",",
-                                {
-                                    "Fn::If": [
-                                        "3BastionCondition",
-                                        {
-                                            "Ref": "EIP3"
-                                        },
-                                        "Null"
-                                    ]
-                                },
-                                ",",
-                                {
-                                    "Fn::If": [
-                                        "4BastionCondition",
-                                        {
-                                            "Ref": "EIP4"
-                                        },
-                                        "Null"
-                                    ]
-                                },
-                                "\"\n",
                                 "CLOUDWATCHGROUP=",
                                 {
                                     "Ref": "BastionMainLogGroup"
@@ -811,37 +837,16 @@
         }
     },
     "Outputs": {
+         "LoadBalancerDNSName": {
+             "Description": "THe DNS name of the load balancer",
+             "Value": {
+                 "Fn::GetAtt": [ "BastionLoadBalancer", "DNSName" ]
+             }
+         },
         "BastionAutoScalingGroup": {
             "Description": "Auto Scaling Group Reference ID",
             "Value": {
                 "Ref": "BastionAutoScalingGroup"
-            }
-        },
-        "EIP1": {
-            "Description": "Elastic IP 1 for Bastion",
-            "Value": {
-                "Ref": "EIP1"
-            }
-        },
-        "EIP2": {
-            "Condition": "2BastionCondition",
-            "Description": "Elastic IP 2 for Bastion",
-            "Value": {
-                "Ref": "EIP2"
-            }
-        },
-        "EIP3": {
-            "Condition": "3BastionCondition",
-            "Description": "Elastic IP 3 for Bastion",
-            "Value": {
-                "Ref": "EIP3"
-            }
-        },
-        "EIP4": {
-            "Condition": "4BastionCondition",
-            "Description": "Elastic IP 4 for Bastion",
-            "Value": {
-                "Ref": "EIP4"
             }
         },
         "CloudWatchLogs": {
