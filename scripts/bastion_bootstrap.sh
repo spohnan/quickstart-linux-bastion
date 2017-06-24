@@ -27,6 +27,7 @@ function usage () {
     echo -e "--help \t Show options for this script"
     echo -e "--banner \t Enable or Disable Bastion Message"
     echo -e "--enable \t SSH Banner"
+    echo -e "--ssh-server-cert-bucket \t S3 bucket for SSH server certs"
     echo -e "--tcp-forwarding \t Enable or Disable TCP Forwarding"
     echo -e "--x11-forwarding \t Enable or Disable X11 Forwarding"
 }
@@ -474,7 +475,7 @@ checkos
 SSH_BANNER="LINUX BASTION"
 
 # Read the options from cli input
-TEMP=`getopt -o h:  --long help,banner:,enable:,tcp-forwarding:,x11-forwarding: -n $0 -- "$@"`
+TEMP=`getopt -o h:  --long help,banner:,enable:,tcp-forwarding:,ssh-server-cert-bucket:,x11-forwarding: -n $0 -- "$@"`
 eval set -- "$TEMP"
 
 
@@ -493,6 +494,10 @@ while true; do
             ;;
         --enable)
             ENABLE="$2";
+            shift 2
+            ;;
+        --ssh-server-cert-bucket)
+            SSH_SERVER_CERT_BUCKET="$2";
             shift 2
             ;;
         --tcp-forwarding)
@@ -586,6 +591,49 @@ fi
 
 prevent_process_snooping
 
-call_request_eip
+export AWS_DEFAULT_REGION=$Region
+yum -y install jq yum-cron
+chkconfig yum-cron on && service yum-cron start
+
+if [ "${SSH_SERVER_CERT_BUCKET}" == "NO_S3_BUCKET_USED" ]; then
+
+	call_request_eip
+
+else
+
+	## Sync server SSH keys
+	INSTANCE_ID=$(curl --silent http://169.254.169.254/latest/meta-data/instance-id)
+	keys_not_present() {
+		return $(aws s3 ls s3://${SSH_SERVER_CERT_BUCKET}/ssh/ssh_host_rsa_key | wc -l)
+	}
+	download_keys() {
+		rm -f /etc/ssh/ssh_host*
+		aws s3api wait object-exists --bucket ${SSH_SERVER_CERT_BUCKET} --key ssh/ssh_host_rsa_key
+		aws s3 sync s3://${SSH_SERVER_CERT_BUCKET}/ssh/ /etc/ssh/ --include 'ssh_host*'
+		find /etc/ssh -name "*key" -exec chmod 600 {} \;
+		service sshd restart
+	}
+	if keys_not_present ; then
+		LEAD_BASTION=$(aws autoscaling describe-auto-scaling-instances | jq --raw-output --sort-keys '.AutoScalingInstances[].InstanceId' | head -1)
+		if [ "$INSTANCE_ID" = "$LEAD_BASTION" ] ; then
+			aws s3 cp /etc/ssh/ s3://${SSH_SERVER_CERT_BUCKET}/ssh/ --recursive --exclude '*' --include '*key*'
+		else
+			download_keys
+		fi
+	else
+		download_keys
+	fi
+
+fi
+
+ASSOCIATION_ID=$(aws ec2 describe-iam-instance-profile-associations \
+	--filters "Name=instance-id,Values=${INSTANCE_ID}" | jq --raw-output '.IamInstanceProfileAssociations[0].AssociationId')
+
+INSTANCE_PROFILE=$(aws iam list-instance-profiles \
+	--path-prefix "/bastion_host/" | jq --raw-output '.InstanceProfiles[0].InstanceProfileName')
+
+aws ec2 replace-iam-instance-profile-association \
+	--association-id $ASSOCIATION_ID \
+	--iam-instance-profile Name=${INSTANCE_PROFILE}
 
 echo "Bootstrap complete."
